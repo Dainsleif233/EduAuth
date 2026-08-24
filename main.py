@@ -40,6 +40,7 @@
 """
 
 import argparse
+import datetime
 import importlib.util
 import json
 import logging
@@ -80,6 +81,7 @@ MAX_BODY_BYTES = 64 * 1024  # 请求体上限
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 AUTHS_DIR = os.path.join(ROOT_DIR, "auths")
 DEFAULT_CONFIG_PATH = os.path.join(ROOT_DIR, CONFIG_NAME)
+LOGS_DIR = os.path.join(ROOT_DIR, "logs")
 
 # output 由「状态前缀 + 分隔符 + 后端 message」拼接而成
 OUTPUT_SEPARATOR = "\n"
@@ -90,6 +92,27 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("eduauth")
+
+
+def setup_file_logging():
+    # type: () -> Optional[str]
+    """在 logs/ 下按启动时间新建日志文件，返回实际路径或 None。"""
+    try:
+        os.makedirs(LOGS_DIR, exist_ok=True)
+        filename = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S.log")
+        path = os.path.join(LOGS_DIR, filename)
+        handler = logging.FileHandler(path, encoding="utf-8")
+        handler.setFormatter(
+            logging.Formatter(
+                "[%(asctime)s] %(levelname)s %(name)s: %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+        )
+        logger.addHandler(handler)
+        return path
+    except OSError as exc:
+        logger.warning("cannot create log file: %s", exc)
+        return None
 
 # 让后端可以 import utils.* 下的通用工具
 sys.path.insert(0, ROOT_DIR)
@@ -1011,6 +1034,10 @@ def main(argv=None):
 
     if args.init_config:
         return init_config(args.config)
+
+    log_path = setup_file_logging()
+    if log_path:
+        logger.info("logging to %s", log_path)
 
     try:
         config = Config.load(args.config)
