@@ -1,0 +1,41 @@
+.idea/
+.vscode/
+.DS_Store
+output/
+/dist/
+/build/
+/data/
+/tmp/
+/log/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+*.egg-info/
+.eggs/
+
+# Testing / coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# Local config / secrets
+.env
+*.local
+config.local.*
+
+# 实际运行配置（保留 config.example.toml 作为模板）
+/config.toml
+
+.VSCodeCounter

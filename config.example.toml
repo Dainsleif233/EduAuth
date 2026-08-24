@@ -1,0 +1,15 @@
+# EduAuth 配置示例
+# 复制为 config.toml 后按需修改，或运行 python main.py --init-config 生成
+
+# 监听地址与端口
+host = "127.0.0.1"
+port = 2268
+
+# 响应头 X-Source-Repo 的值；Fork 本项目后须改成自己的仓库地址
+source_repo = "https://github.com/Dainsleif233/EduAuth"
+
+# 各后端开关，默认全部关闭。
+# 值为 true 的后端才会被加载，未列出的 id 同样视为关闭。
+[auths]
+test = false    # 测试后端，仅用于验证框架功能
+ujs = false

@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  pull_request:
+
+jobs:
+  syntax-check:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.8", "3.9", "3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: AST syntax check (3.8 grammar)
+        run: |
+          python -c "
+          import ast, pathlib, sys
+          root = pathlib.Path('.')
+          files = [f for f in sorted(root.rglob('*.py')) if '__pycache__' not in str(f)]
+          ok = True
+          for f in files:
+              try:
+                  ast.parse(f.read_text(encoding='utf-8'), filename=str(f), feature_version=(3, 8))
+              except SyntaxError as e:
+                  print(f'::error file={f}::{e}')
+                  ok = False
+          print(f'Checked {len(files)} files')
+          sys.exit(0 if ok else 1)
+          "
