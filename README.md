@@ -118,7 +118,8 @@ X-License: AGPL-3.0
 ```
 ├── auths/              # 认证后端
 │   ├── ujs/
-│   │   ├── assets/     # 资源文件
+│   │   ├── assets/     # 滑块背景图（0-9.png）
+│   │   ├── README.md   # UJS 后端说明
 │   │   └── main.py     # 后端主程序入口
 │   ├── test/
 │   │   ├── README.md   # 测试账号说明
@@ -128,6 +129,7 @@ X-License: AGPL-3.0
 ├── utils/              # 通用工具（验证码识别、加解密等）
 ├── main.py             # 主程序入口
 ├── config.example.toml # 配置模板
+├── requirements.txt    # 后端依赖
 ├── LICENSE
 ├── CODE_OF_CONDUCT.md
 └── README.md
@@ -166,6 +168,12 @@ ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 ```
 
 跨学校复用的逻辑（验证码识别、加解密等）放进 `utils/`，后端里直接 `from utils.xxx import yyy`。
+
+`utils/` 已内置：
+- `utils.captcha` — 滑块验证码像素差分识别（仅需 Pillow）
+- `utils.crypto` — 零依赖 AES-CBC(PKCS7) 加密、安全随机串、毫秒时间戳
+
+> **后端依赖**：框架本体零依赖，但单个后端可自带依赖。例如 `ujs` 后端的滑块识别需要 `pip install Pillow`。
 
 ## 参与开发
 

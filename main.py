@@ -358,7 +358,6 @@ class Config:
 
         [auths]
         ujs = false
-        zjxu = false
 
     [auths] 中值为 true 的后端才会被加载，未列出的视为关闭（默认全关）。
     """
@@ -912,7 +911,7 @@ class EduAuthHandler(BaseHTTPRequestHandler):
 
     def handle_one_request(self):
         # type: () -> None
-        """覆盖基类，捕获 BrokenPipeError 防止 traceback 逃逸。"""
+        """覆盖基类，捕获 BrokenPipeError / TimeoutError 防止 traceback 逃逸。"""
         try:
             self.raw_requestline = self.rfile.readline(65537)
             if not self.raw_requestline:
@@ -929,8 +928,11 @@ class EduAuthHandler(BaseHTTPRequestHandler):
             self.log_request()
         except BrokenPipeError:
             self.close_connection = True
+        except TimeoutError:
+            self.close_connection = True
         except Exception:
-            self.handle_error()
+            logger.error("request handling error:\n%s", traceback.format_exc())
+            self.close_connection = True
 
     # ----- 日志 -----
 
