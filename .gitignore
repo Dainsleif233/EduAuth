@@ -40,5 +40,6 @@ config.local.*
 
 # 实际运行配置（保留 config.example.toml 作为模板）
 /config.toml
+eduauth.pid
 
 .VSCodeCounter
