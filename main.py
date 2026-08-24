@@ -40,12 +40,14 @@
 """
 
 import argparse
+import atexit
 import datetime
 import importlib.util
 import json
 import logging
 import os
 import re
+import signal
 import sys
 import traceback
 from enum import IntEnum
@@ -82,6 +84,7 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 AUTHS_DIR = os.path.join(ROOT_DIR, "auths")
 DEFAULT_CONFIG_PATH = os.path.join(ROOT_DIR, CONFIG_NAME)
 LOGS_DIR = os.path.join(ROOT_DIR, "logs")
+DEFAULT_PID_FILE = os.path.join(ROOT_DIR, "eduauth.pid")
 
 # output 由「状态前缀 + 分隔符 + 后端 message」拼接而成
 OUTPUT_SEPARATOR = "\n"
@@ -113,6 +116,234 @@ def setup_file_logging():
     except OSError as exc:
         logger.warning("cannot create log file: %s", exc)
         return None
+
+
+# --------------------------------------------------------------------------- #
+# 守护进程相关
+# --------------------------------------------------------------------------- #
+
+import sys
+import platform
+
+def daemonize(pid_file=DEFAULT_PID_FILE):
+    # type: (str) -> None
+    """将当前进程转为守护进程（后台运行）。
+
+    支持 Unix 和 Windows 平台。
+    """
+    # 检查是否已在运行
+    if os.path.exists(pid_file):
+        try:
+            with open(pid_file, 'r') as f:
+                old_pid = int(f.read().strip())
+            # 检查进程是否存在
+            os.kill(old_pid, 0)
+            logger.error("EduAuth is already running (PID: %d)", old_pid)
+            sys.exit(1)
+        except (ValueError, ProcessLookupError, PermissionError, OSError):
+            # PID 文件存在但进程不存在，可以继续
+            pass
+
+    if platform.system() == "Windows":
+        # Windows: 使用 CREATE_NEW_PROCESS_GROUP 和 DETACHED_PROCESS 创建分离进程
+        import subprocess
+        # 设置环境变量，避免子进程重复调用 daemonize
+        env = os.environ.copy()
+        env['EDUAUTH_DAEMON'] = '1'
+        # 重新启动当前脚本作为子进程，使用新窗口和分离标志
+        cmd = [sys.executable] + sys.argv
+        # 创建新的进程组和分离的进程
+        creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        # 打开日志文件重定向输出
+        log_dir = os.path.join(ROOT_DIR, "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        log_file = os.path.join(log_dir, "daemon.log")
+        with open(log_file, 'a') as log_fh:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=log_fh,
+                stderr=log_fh,
+                stdin=subprocess.DEVNULL,
+                creationflags=creation_flags,
+                cwd=ROOT_DIR,
+                env=env
+            )
+        # 写入子进程的 PID
+        try:
+            with open(pid_file, 'w') as f:
+                f.write(str(proc.pid))
+            logger.info("PID file written: %s (PID: %d)", pid_file, proc.pid)
+        except OSError as e:
+            logger.warning("Cannot write PID file: %s", e)
+        # 父进程退出
+        sys.exit(0)
+    else:
+        # Unix: 使用双 fork 守护进程
+        # 第一次 fork
+        try:
+            if os.fork() > 0:
+                # 父进程退出
+                sys.exit(0)
+        except OSError as e:
+            logger.error("First fork failed: %s", e)
+            sys.exit(1)
+
+        # 创建新会话
+        os.setsid()
+
+        # 第二次 fork
+        try:
+            if os.fork() > 0:
+                # 第一个子进程退出
+                sys.exit(0)
+        except OSError as e:
+            logger.error("Second fork failed: %s", e)
+            sys.exit(1)
+
+        # 重定向标准文件描述符到 /dev/null
+        devnull = os.open(os.devnull, os.O_RDWR)
+        os.dup2(devnull, 0)  # stdin
+        os.dup2(devnull, 1)  # stdout
+        os.dup2(devnull, 2)  # stderr
+        os.close(devnull)
+
+        # 写入 PID 文件
+        try:
+            with open(pid_file, 'w') as f:
+                f.write(str(os.getpid()))
+            logger.info("PID file written: %s (PID: %d)", pid_file, os.getpid())
+        except OSError as e:
+            logger.warning("Cannot write PID file: %s", e)
+
+    # 注册退出清理
+    def cleanup_pid_file():
+        try:
+            if os.path.exists(pid_file):
+                os.remove(pid_file)
+        except OSError:
+            pass
+
+    atexit.register(cleanup_pid_file)
+
+
+def stop_daemon(pid_file=DEFAULT_PID_FILE):
+    # type: (str) -> int
+    """停止后台运行的 EduAuth 进程。"""
+    if not os.path.exists(pid_file):
+        logger.error("PID file not found: %s", pid_file)
+        return 1
+
+    try:
+        with open(pid_file, 'r') as f:
+            pid = int(f.read().strip())
+    except (ValueError, IOError) as e:
+        logger.error("Cannot read PID file: %s", e)
+        return 1
+
+    try:
+        # 发送终止信号
+        if platform.system() == "Windows":
+            # Windows: 使用 taskkill 命令强制终止进程
+            import subprocess
+            result = subprocess.run(
+                ['taskkill', '/F', '/PID', str(pid)],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode == 0:
+                logger.info("Process %d stopped successfully", pid)
+                try:
+                    os.remove(pid_file)
+                except OSError:
+                    pass
+                return 0
+            else:
+                logger.error("Failed to stop process %d: %s", pid, result.stderr)
+                return 1
+        else:
+            # Unix: 使用 SIGTERM 信号
+            os.kill(pid, signal.SIGTERM)
+            logger.info("Sent SIGTERM to process %d", pid)
+
+            # 等待进程退出
+            import time
+            for _ in range(10):  # 最多等待10秒
+                try:
+                    os.kill(pid, 0)  # 检查进程是否仍在运行
+                    time.sleep(0.5)
+                except ProcessLookupError:
+                    logger.info("Process %d stopped successfully", pid)
+                    # 清理 PID 文件
+                    try:
+                        os.remove(pid_file)
+                    except OSError:
+                        pass
+                    return 0
+
+            # 如果进程仍在运行，强制杀死
+            logger.warning("Process %d did not stop gracefully, sending SIGKILL", pid)
+            os.kill(pid, signal.SIGKILL)
+            time.sleep(0.5)
+            try:
+                os.remove(pid_file)
+            except OSError:
+                pass
+            return 0
+
+    except ProcessLookupError:
+        logger.error("Process %d not found", pid)
+        try:
+            os.remove(pid_file)
+        except OSError:
+            pass
+        return 1
+    except PermissionError:
+        logger.error("Permission denied to stop process %d", pid)
+        return 1
+    except Exception as e:
+        logger.error("Error stopping process %d: %s", pid, e)
+        return 1
+
+
+def get_daemon_status(pid_file=DEFAULT_PID_FILE):
+    # type: (str) -> Tuple[bool, Optional[int]]
+    """检查守护进程状态。返回 (is_running, pid)。"""
+    if not os.path.exists(pid_file):
+        return False, None
+
+    try:
+        with open(pid_file, 'r') as f:
+            pid = int(f.read().strip())
+    except (ValueError, IOError):
+        return False, None
+
+    try:
+        if platform.system() == "Windows":
+            # Windows: 使用 tasklist 检查进程是否存在
+            import subprocess
+            result = subprocess.run(
+                ['tasklist', '/FI', 'PID eq {}'.format(pid)],
+                capture_output=True,
+                text=True
+            )
+            # 检查输出中是否包含 PID
+            if 'Python' in result.stdout and str(pid) in result.stdout:
+                return True, pid
+            else:
+                return False, pid
+        else:
+            # Unix: 使用 os.kill(pid, 0) 检查进程是否存在
+            os.kill(pid, 0)
+            return True, pid
+    except ProcessLookupError:
+        return False, pid
+    except PermissionError:
+        # 无权限检查，但进程可能存在
+        return True, pid
+    except Exception:
+        # 其他异常，假设进程不存在
+        return False, pid
+
 
 # 让后端可以 import utils.* 下的通用工具
 sys.path.insert(0, ROOT_DIR)
@@ -983,6 +1214,36 @@ def parse_args(argv):
         action="store_true",
         help="按 auths/ 下的目录生成一份全关的配置文件后退出",
     )
+
+    # 后台运行相关参数
+    daemon_group = parser.add_argument_group("daemon", "后台运行模式")
+    daemon_group.add_argument(
+        "-d",
+        "--daemon",
+        action="store_true",
+        help="以守护进程方式在后台运行",
+    )
+    daemon_group.add_argument(
+        "--stop",
+        action="store_true",
+        help="停止后台运行的 EduAuth 进程",
+    )
+    daemon_group.add_argument(
+        "--status",
+        action="store_true",
+        help="查看后台运行的 EduAuth 进程状态",
+    )
+    daemon_group.add_argument(
+        "--pid-file",
+        default=DEFAULT_PID_FILE,
+        help="PID 文件路径（默认 ./eduauth.pid）",
+    )
+    daemon_group.add_argument(
+        "--foreground",
+        action="store_true",
+        help="前台运行（默认行为，与 --daemon 互斥）",
+    )
+
     args = parser.parse_args(argv)
 
     if args.address is not None:
@@ -1037,6 +1298,19 @@ def main(argv=None):
     if args.init_config:
         return init_config(args.config)
 
+    # 处理后台进程控制命令
+    if args.stop:
+        return stop_daemon(args.pid_file)
+
+    if args.status:
+        is_running, pid = get_daemon_status(args.pid_file)
+        if is_running:
+            print("EduAuth is running (PID: {})".format(pid))
+            return 0
+        else:
+            print("EduAuth is not running")
+            return 1
+
     log_path = setup_file_logging()
     if log_path:
         logger.info("logging to %s", log_path)
@@ -1065,9 +1339,25 @@ def main(argv=None):
     loaded = registry.ids()
     logger.info("loaded backends: %s", ", ".join(loaded) if loaded else "(none)")
 
+    # 处理守护进程模式
+    if args.daemon and not os.environ.get('EDUAUTH_DAEMON'):
+        # 启动前 fork 到后台（如果还不是守护进程）
+        daemonize(args.pid_file)
+
+        # 注册信号处理
+        def signal_handler(signum, frame):
+            logger.info("Received signal %d, shutting down...", signum)
+            sys.exit(0)
+
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
+
     server = EduAuthServer((config.host, config.port), EduAuthHandler)
     logger.info("EduAuth listening on http://%s:%d", config.host, config.port)
     logger.info("source: %s (%s)", config.source_repo, LICENSE)
+
+    if args.daemon:
+        logger.info("running as daemon (PID: %d)", os.getpid())
 
     try:
         server.serve_forever()
@@ -1075,6 +1365,12 @@ def main(argv=None):
         logger.info("shutting down")
     finally:
         server.server_close()
+        # 清理 PID 文件
+        if args.daemon and os.path.exists(args.pid_file):
+            try:
+                os.remove(args.pid_file)
+            except OSError:
+                pass
     return 0
 
 
