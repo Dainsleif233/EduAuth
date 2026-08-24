@@ -2,8 +2,7 @@
 # 复制为 config.toml 后按需修改，或运行 python main.py --init-config 生成
 
 # 监听地址与端口
-host = "127.0.0.1"
-port = 2268
+bind = ["127.0.0.1:2268"]
 
 # 响应头 X-Source-Repo 的值；Fork 本项目后须改成自己的仓库地址
 source_repo = "https://github.com/Dainsleif233/EduAuth"

@@ -478,11 +478,52 @@ def _parse_value(token, lineno):
         return _unquote(token, lineno)
     if _INT_LITERAL.match(token):
         return int(token.replace("_", ""))
-    if token.startswith(("[", "{")):
+    if token.startswith(("{",)):
         raise ConfigError(
-            "line {}: arrays and inline tables are not supported".format(lineno)
+            "line {}: inline tables are not supported".format(lineno)
         )
+    if token.startswith("["):
+        return _parse_array(token, lineno)
     raise ConfigError("line {}: unsupported value {!r}".format(lineno, token))
+
+
+def _parse_array(token, lineno):
+    # type: (str, int) -> List[Any]
+    """解析 TOML 内联数组，仅支持字符串、整数、布尔。"""
+    if not token.startswith("[") or not token.endswith("]"):
+        raise ConfigError("line {}: unterminated array".format(lineno))
+    inner = token[1:-1].strip()
+    if not inner:
+        return []
+    items = []
+    depth = 0
+    current = ""
+    in_quote = ""
+    for ch in inner:
+        if in_quote:
+            current += ch
+            if ch == "\\":
+                continue
+            if ch == in_quote:
+                in_quote = ""
+            continue
+        if ch in ('"', "'"):
+            in_quote = ch
+            current += ch
+        elif ch == "[":
+            depth += 1
+            current += ch
+        elif ch == "]":
+            depth -= 1
+            current += ch
+        elif ch == "," and depth == 0:
+            items.append(current.strip())
+            current = ""
+        else:
+            current += ch
+    if current.strip():
+        items.append(current.strip())
+    return [_parse_value(item, lineno) for item in items]
 
 
 def toml_loads(text):
@@ -553,6 +594,9 @@ def _dump_value(value):
         return "true" if value else "false"
     if isinstance(value, int):
         return str(value)
+    if isinstance(value, list):
+        parts = [_dump_value(item) for item in value]
+        return "[" + ", ".join(parts) + "]"
     return json.dumps(str(value), ensure_ascii=False)
 
 
@@ -583,23 +627,26 @@ class Config:
     """运行时配置。
 
     config.toml:
-        host = "127.0.0.1"
-        port = 2268
+        bind = ["127.0.0.1:2268"]
         source_repo = "https://github.com/Dainsleif233/EduAuth"
 
         [auths]
         ujs = false
 
+    bind 是一组 "host:port" 字符串，支持多监听地址。
+    兼容旧版 host / port 标量配置，启动时自动转换。
+
     [auths] 中值为 true 的后端才会被加载，未列出的视为关闭（默认全关）。
     """
 
-    __slots__ = ("host", "port", "source_repo", "auths", "path")
+    __slots__ = ("binds", "source_repo", "auths", "path")
 
-    def __init__(self, host=DEFAULT_HOST, port=DEFAULT_PORT,
-                 source_repo=DEFAULT_SOURCE_REPO, auths=None, path=None):
-        # type: (str, int, str, Optional[Dict[str, bool]], Optional[str]) -> None
-        self.host = host
-        self.port = port
+    DEFAULT_BIND = "{}:{}".format(DEFAULT_HOST, DEFAULT_PORT)
+
+    def __init__(self, binds=None, source_repo=DEFAULT_SOURCE_REPO,
+                 auths=None, path=None):
+        # type: (Optional[List[str]], str, Optional[Dict[str, bool]], Optional[str]) -> None
+        self.binds = list(binds or [self.DEFAULT_BIND])
         self.source_repo = source_repo
         self.auths = dict(auths or {})
         self.path = path
@@ -650,21 +697,43 @@ class Config:
         if not isinstance(data, dict):
             raise ConfigError("{}: top level must be a table".format(where))
 
-        host = data.get("host", DEFAULT_HOST)
-        if not isinstance(host, str) or not host:
-            raise ConfigError("{}: host must be a non-empty string".format(where))
-
-        port = data.get("port", DEFAULT_PORT)
-        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
-            raise ConfigError("{}: port must be an integer in 1-65535".format(where))
+        # 兼容旧版 host / port 标量
+        if "bind" in data:
+            binds = data["bind"]
+            if not isinstance(binds, list) or not binds:
+                raise ConfigError(
+                    "{}: bind must be a non-empty array of strings".format(where)
+                )
+            for item in binds:
+                if not isinstance(item, str) or not item:
+                    raise ConfigError(
+                        "{}: each bind entry must be a non-empty string".format(where)
+                    )
+        else:
+            host = data.get("host", DEFAULT_HOST)
+            if not isinstance(host, str) or not host:
+                raise ConfigError(
+                    "{}: host must be a non-empty string".format(where)
+                )
+            port = data.get("port", DEFAULT_PORT)
+            if isinstance(port, bool) or not isinstance(port, int) \
+                    or not 1 <= port <= 65535:
+                raise ConfigError(
+                    "{}: port must be an integer in 1-65535".format(where)
+                )
+            binds = ["{}:{}".format(host, port)]
 
         source_repo = data.get("source_repo", DEFAULT_SOURCE_REPO)
         if not isinstance(source_repo, str) or not source_repo:
-            raise ConfigError("{}: source_repo must be a non-empty string".format(where))
+            raise ConfigError(
+                "{}: source_repo must be a non-empty string".format(where)
+            )
 
         raw_auths = data.get("auths", {})
         if not isinstance(raw_auths, dict):
-            raise ConfigError("{}: [auths] must be a table of id = bool".format(where))
+            raise ConfigError(
+                "{}: [auths] must be a table of id = bool".format(where)
+            )
 
         auths = {}
         for key, value in raw_auths.items():
@@ -674,15 +743,14 @@ class Config:
                 )
             auths[str(key).lower()] = value
 
-        return cls(host, port, source_repo, auths, path)
+        return cls(binds, source_repo, auths, path)
 
     # ----- 生成 -----
 
     def to_dict(self):
         # type: () -> Dict[str, Any]
         return {
-            "host": self.host,
-            "port": self.port,
+            "bind": self.binds,
             "source_repo": self.source_repo,
             "auths": {k: self.auths[k] for k in sorted(self.auths)},
         }
@@ -1192,7 +1260,8 @@ def parse_args(argv):
     # type: (List[str]) -> argparse.Namespace
     """解析命令行参数。
 
-    address 与 --config 均可省略；address 会覆盖配置文件中的 host/port。
+    address 与 --config 均可省略；address 会覆盖配置文件中的 bind。
+    address 格式: host:port 或 port，多个用逗号分隔。
     """
     parser = argparse.ArgumentParser(
         prog="eduauth", description="EduAuth - 高校身份认证统一接口框架"
@@ -1201,7 +1270,7 @@ def parse_args(argv):
         "address",
         nargs="?",
         default=None,
-        help="监听地址，形如 host:port 或仅 port（覆盖配置文件）",
+        help="监听地址，形如 host:port、port 或逗号分隔的多个地址（覆盖配置文件）",
     )
     parser.add_argument(
         "-c",
@@ -1247,20 +1316,24 @@ def parse_args(argv):
     args = parser.parse_args(argv)
 
     if args.address is not None:
-        args.host, args.port = _split_address(parser, args.address)
+        args.binds = _parse_bind_list(parser, args.address)
     else:
-        args.host, args.port = None, None
+        args.binds = None
     return args
 
 
-def _split_address(parser, address):
-    # type: (argparse.ArgumentParser, str) -> Tuple[Optional[str], int]
-    """把 "host:port" 或 "port" 拆成 (host, port)。"""
+def _split_bind(parser, address):
+    # type: (argparse.ArgumentParser, str) -> str
+    """解析单个 host:port 或 port，返回标准 host:port 字符串。"""
+    address = address.strip()
+    if not address:
+        parser.error("empty bind address")
+
     if ":" in address:
         host, _, port_str = address.rpartition(":")
-        host = host or None
+        host = host or DEFAULT_HOST
     else:
-        host, port_str = None, address
+        host, port_str = DEFAULT_HOST, address
 
     try:
         port = int(port_str)
@@ -1270,7 +1343,13 @@ def _split_address(parser, address):
     if not 1 <= port <= 65535:
         parser.error("port out of range: {}".format(port))
 
-    return host, port
+    return "{}:{}".format(host, port)
+
+
+def _parse_bind_list(parser, raw):
+    # type: (argparse.ArgumentParser, str) -> List[str]
+    """把逗号分隔的地址列表解析为 ["host:port", ...]。"""
+    return [_split_bind(parser, part) for part in raw.split(",") if part.strip()]
 
 
 def init_config(path):
@@ -1322,10 +1401,8 @@ def main(argv=None):
         return 1
 
     # 命令行地址覆盖配置文件
-    if args.host:
-        config.host = args.host
-    if args.port:
-        config.port = args.port
+    if args.binds is not None:
+        config.binds = args.binds
 
     for auth_id in scan_auth_ids():
         if not config.is_known(auth_id):
@@ -1338,6 +1415,16 @@ def main(argv=None):
 
     loaded = registry.ids()
     logger.info("loaded backends: %s", ", ".join(loaded) if loaded else "(none)")
+
+    # 解析所有绑定地址
+    bind_addrs = []
+    for bind_str in config.binds:
+        if ":" in bind_str:
+            host, _, port_str = bind_str.rpartition(":")
+            host = host or "0.0.0.0"
+        else:
+            host, port_str = "0.0.0.0", bind_str
+        bind_addrs.append((host, int(port_str)))
 
     # 处理守护进程模式
     if args.daemon and not os.environ.get('EDUAUTH_DAEMON'):
@@ -1352,19 +1439,33 @@ def main(argv=None):
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
-    server = EduAuthServer((config.host, config.port), EduAuthHandler)
-    logger.info("EduAuth listening on http://%s:%d", config.host, config.port)
+    servers = []
+    for addr in bind_addrs:
+        srv = EduAuthServer(addr, EduAuthHandler)
+        servers.append(srv)
+        logger.info("EduAuth listening on http://%s:%d", addr[0], addr[1])
     logger.info("source: %s (%s)", config.source_repo, LICENSE)
 
     if args.daemon:
         logger.info("running as daemon (PID: %d)", os.getpid())
 
+    # 启动所有服务器（多线程，各自阻塞）
     try:
-        server.serve_forever()
+        threads = []
+        for srv in servers:
+            t = __import__("threading").Thread(
+                target=srv.serve_forever, daemon=True
+            )
+            t.start()
+            threads.append(t)
+        # 主线程等待任意一个结束（通常不会发生）
+        for t in threads:
+            t.join()
     except KeyboardInterrupt:
         logger.info("shutting down")
     finally:
-        server.server_close()
+        for srv in servers:
+            srv.server_close()
         # 清理 PID 文件
         if args.daemon and os.path.exists(args.pid_file):
             try:
