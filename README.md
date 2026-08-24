@@ -31,8 +31,8 @@ port = 2268
 source_repo = "https://github.com/Dainsleif233/EduAuth"
 
 [auths]
+test = false
 ujs = false
-zjxu = false
 ```
 
 | 字段 | 说明 | 默认 |
@@ -120,13 +120,12 @@ X-License: AGPL-3.0
 │   ├── ujs/
 │   │   ├── assets/     # 资源文件
 │   │   └── main.py     # 后端主程序入口
-│   ├── zjxu/
-│   │   └── main.py
+│   ├── test/
+│   │   ├── README.md   # 测试账号说明
+│   │   └── main.py     # 演示后端
 │   └── <id>/
 │       └── main.py
 ├── utils/              # 通用工具（验证码识别、加解密等）
-├── tests/
-│   └── test_framework.py
 ├── main.py             # 主程序入口
 ├── config.example.toml # 配置模板
 ├── LICENSE
@@ -167,12 +166,6 @@ ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 ```
 
 跨学校复用的逻辑（验证码识别、加解密等）放进 `utils/`，后端里直接 `from utils.xxx import yyy`。
-
-## 测试
-
-```bash
-python tests/test_framework.py
-```
 
 ## 参与开发
 

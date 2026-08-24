@@ -95,6 +95,12 @@ logger = logging.getLogger("eduauth")
 sys.path.insert(0, ROOT_DIR)
 
 
+def _mask_sensitive(line):
+    # type: (str) -> str
+    """脱敏日志中可能出现的密码参数，防止凭据明文写入日志。"""
+    return re.sub(r'(?i)(password|passwd|pwd)\s*=\s*\S+', r'\1=***', line)
+
+
 class Status(IntEnum):
     """认证状态码，与源项目保持一致。"""
 
@@ -241,6 +247,8 @@ def _toml_loads_minimal(text):
     """精简 TOML 解析器，仅覆盖本项目配置所需语法。"""
     root = {}  # type: Dict[str, Any]
     table = root
+    defined = set()  # 已通过表头声明过的表路径
+
     for lineno, raw in enumerate(text.splitlines(), 1):
         line = _strip_comment(raw).strip()
         if not line:
@@ -254,11 +262,19 @@ def _toml_loads_minimal(text):
             if not line.endswith("]"):
                 raise ConfigError("line {}: unterminated table header".format(lineno))
             table = root
+            path_parts = []
             for part in line[1:-1].split("."):
                 key = _parse_key(part.strip(), lineno)
+                path_parts.append(key)
                 table = table.setdefault(key, {})
                 if not isinstance(table, dict):
                     raise ConfigError("line {}: {!r} is not a table".format(lineno, key))
+            dotted = ".".join(path_parts)
+            if dotted in defined:
+                raise ConfigError(
+                    "line {}: duplicate table definition {!r}".format(lineno, dotted)
+                )
+            defined.add(dotted)
             continue
 
         if "=" not in line:
@@ -507,7 +523,11 @@ class BackendRegistry:
             raise ImportError("cannot create module spec for {}".format(entry_file))
         module = importlib.util.module_from_spec(spec)
         sys.modules[module_name] = module
-        spec.loader.exec_module(module)
+        try:
+            spec.loader.exec_module(module)
+        except Exception:
+            sys.modules.pop(module_name, None)
+            raise
 
         func = getattr(module, self.ENTRYPOINT, None)
         if not callable(func):
@@ -586,6 +606,8 @@ def dispatch(auth_id, login, password):
         status, message = _normalize(backend(login, password))
     except NotImplementedError as exc:
         return build_result(auth_id, Status.ERROR, "not implemented: {}".format(exc))
+    except ValueError as exc:
+        return build_result(auth_id, Status.ERROR, "invalid status code: {}".format(exc))
     except Exception:
         logger.error("backend %s raised:\n%s", auth_id, traceback.format_exc())
         return build_result(auth_id, Status.ERROR, "internal error")
@@ -662,6 +684,12 @@ def _parse_json(body, charset):
             fields[str(key)] = ""
         elif isinstance(value, (str, int, float, bool)):
             fields[str(key)] = value if isinstance(value, str) else str(value)
+        else:
+            raise ParseError(
+                "JSON field {!r} must be a scalar, got {}".format(
+                    key, type(value).__name__
+                )
+            )
     return fields
 
 
@@ -690,6 +718,7 @@ class EduAuthHandler(BaseHTTPRequestHandler):
 
     server_version = "EduAuth/1.0"
     protocol_version = "HTTP/1.1"
+    timeout = 30  # 防止 slowloris 攻击占用线程
 
     # ----- 响应 -----
 
@@ -729,16 +758,69 @@ class EduAuthHandler(BaseHTTPRequestHandler):
     def _read_body(self):
         # type: () -> Optional[bytes]
         """读取请求体；超出上限时返回 None（响应已发出）。"""
+        transfer = self.headers.get("Transfer-Encoding", "").lower()
+        if "chunked" in transfer:
+            return self._read_chunked()
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             length = 0
         if length > MAX_BODY_BYTES:
+            self.close_connection = True
             self._send_error_result(
                 413, self._extract_id() or "", "request body too large"
             )
             return None
         return self.rfile.read(length) if length > 0 else b""
+
+    def _read_chunked(self):
+        # type: () -> Optional[bytes]
+        """解码 Transfer-Encoding: chunked 请求体。"""
+        chunks = []
+        total = 0
+        while True:
+            # 读取 chunk size（十六进制）
+            size_line = self.rfile.readline(65537)
+            if not size_line:
+                self.close_connection = True
+                self._send_error_result(
+                    400, self._extract_id() or "", "incomplete chunked body"
+                )
+                return None
+            size_str = size_line.strip()
+            # chunk size 后面可能跟 ;extensions，取分号前的部分
+            if b";" in size_str:
+                size_str = size_str.split(b";", 1)[0]
+            try:
+                chunk_size = int(size_str, 16)
+            except ValueError:
+                self.close_connection = True
+                self._send_error_result(
+                    400, self._extract_id() or "", "invalid chunk size"
+                )
+                return None
+            if chunk_size == 0:
+                # 读取尾部 \r\n
+                self.rfile.readline()
+                break
+            total += chunk_size
+            if total > MAX_BODY_BYTES:
+                self.close_connection = True
+                self._send_error_result(
+                    413, self._extract_id() or "", "request body too large"
+                )
+                return None
+            data = self.rfile.read(chunk_size)
+            if len(data) < chunk_size:
+                self.close_connection = True
+                self._send_error_result(
+                    400, self._extract_id() or "", "incomplete chunked body"
+                )
+                return None
+            chunks.append(data)
+            # 读取 chunk 后的 \r\n
+            self.rfile.readline()
+        return b"".join(chunks)
 
     # ----- 各 HTTP 方法 -----
 
@@ -752,6 +834,7 @@ class EduAuthHandler(BaseHTTPRequestHandler):
         # type: () -> None
         auth_id = self._extract_id()
         if not auth_id:
+            self.close_connection = True
             self._send_error_result(400, "", "missing auth id in URL path")
             return
 
@@ -765,6 +848,7 @@ class EduAuthHandler(BaseHTTPRequestHandler):
         # type: () -> None
         auth_id = self._extract_id()
         if not auth_id:
+            self.close_connection = True
             self._send_error_result(400, "", "missing auth id in URL path")
             return
 
@@ -775,6 +859,7 @@ class EduAuthHandler(BaseHTTPRequestHandler):
         try:
             fields = parse_body(self.headers.get("Content-Type", ""), body)
         except ParseError as exc:
+            self.close_connection = True
             self._send_error_result(400, auth_id, str(exc))
             return
 
@@ -797,13 +882,38 @@ class EduAuthHandler(BaseHTTPRequestHandler):
 
     def _method_not_allowed(self):
         # type: () -> None
+        self.close_connection = True
         self._send_error_result(405, self._extract_id() or "", "method not allowed")
+
+    # ----- 连接管理 -----
+
+    def handle_one_request(self):
+        # type: () -> None
+        """覆盖基类，捕获 BrokenPipeError 防止 traceback 逃逸。"""
+        try:
+            self.raw_requestline = self.rfile.readline(65537)
+            if not self.raw_requestline:
+                self.close_connection = True
+                return
+            if not self.parse_request():
+                return
+            mname = 'do_' + self.command
+            if not hasattr(self, mname):
+                self.send_error(501, "Unsupported method (%r)" % self.command)
+                return
+            method = getattr(self, mname)
+            method()
+            self.log_request()
+        except BrokenPipeError:
+            self.close_connection = True
+        except Exception:
+            self.handle_error()
 
     # ----- 日志 -----
 
     def log_message(self, format, *args):
         # type: (str, Any) -> None
-        logger.info("%s %s", self.client_address[0], format % args)
+        logger.info("%s %s", self.client_address[0], _mask_sensitive(format % args))
 
 
 class EduAuthServer(ThreadingHTTPServer):
