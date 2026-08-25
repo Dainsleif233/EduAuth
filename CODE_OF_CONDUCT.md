@@ -20,7 +20,7 @@
 
 3. 在 GitHub、GitLab 等平台发布的衍生仓库
 
-> ✅ **衍生作品定义**：包含 ≥10% 本项目源代码或核心逻辑重用的作品
+> ✅ **衍生作品定义**：包含 ≥10% 本项目后端源代码或后端核心逻辑重用的作品
 
 ---
 
@@ -36,7 +36,7 @@
 
 - [ ] **声明嵌入**：在 `README.md` 首行添加：
 
-  > "本衍生作品基于 [Dainsleif233/Edu-Auth](https://github.com/Dainsleif233/Edu-Auth) 构建，遵循 AGPL-3.0 协议"
+  > "本衍生作品基于 [Dainsleif233/EduAuth](https://github.com/Dainsleif233/EduAuth) 构建，遵循 AGPL-3.0 协议"
 
 ### 2. API 服务声明
 

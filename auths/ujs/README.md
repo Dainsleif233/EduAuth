@@ -1,6 +1,6 @@
 # ujs 后端
 
-江苏大学（UJS）统一身份认证后端，移植自 [Go 版 Edu-Auth](https://github.com/Dainsleif233/Edu-Auth-Go)。
+江苏大学（UJS）统一身份认证后端。
 
 ## 依赖
 
